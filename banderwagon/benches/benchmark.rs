@@ -8,15 +8,27 @@ pub fn msm_wnaf(c: &mut Criterion) {
     let bases = random_point(120, NUM_ELEMENTS);
     let scalars = random_scalars(NUM_ELEMENTS, 16);
 
-    let precomp = MSMPrecompWnaf::new(&bases, 12);
+    let precomp_wnaf = MSMPrecompWnaf::new(&bases, 12);
+    let precomp_ws = MSMPrecompWindowSigned::new(&bases, 16);
 
     c.bench_function(&format!("msm wnaf: {}", NUM_ELEMENTS), |b| {
-        b.iter(|| precomp.mul(&scalars))
+        b.iter(|| precomp_wnaf.mul(&scalars))
     });
 
-    let precomp = MSMPrecompWindowSigned::new(&bases, 16);
     c.bench_function(&format!("msm precomp 16: {}", NUM_ELEMENTS), |b| {
-        b.iter(|| precomp.mul(&scalars))
+        b.iter(|| precomp_ws.mul(&scalars))
+    });
+
+    let mut scalars = vec![Fr::from(0); NUM_ELEMENTS];
+    let idx = 3;
+    scalars[idx] = random_scalars(1, 16)[0];
+
+    c.bench_function(&format!("msm wnaf single idx: {}", idx), |b| {
+        b.iter(|| precomp_wnaf.mul(&scalars))
+    });
+
+    c.bench_function(&format!("msm precomp 16 single idx: {}", idx), |b| {
+        b.iter(|| precomp_ws.mul(&scalars))
     });
 }
 

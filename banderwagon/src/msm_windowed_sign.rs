@@ -66,21 +66,15 @@ impl MSMPrecompWindowSigned {
     }
 
     pub fn mul(&self, scalars: &[Fr]) -> Element {
-        let scalars_bytes: Vec<_> = scalars
-            .iter()
-            .map(|a| {
-                let bigint: BigInteger256 = (*a).into();
-                bigint.to_bytes_le()
-            })
-            .collect();
+        let mut result = EdwardsProjective::zero();
 
-        let mut points_to_add = Vec::with_capacity(self.num_windows);
-
-        for window_idx in 0..self.num_windows {
-            for (scalar_idx, scalar_bytes) in scalars_bytes.iter().enumerate() {
-                let sub_table = &self.tables[scalar_idx];
-                let point_idx =
-                    get_booth_index(window_idx, self.window_size, scalar_bytes.as_ref());
+        for (scalar_idx, scalar) in scalars.iter().enumerate() {
+            if scalar.is_zero() {
+                continue;
+            }
+            let scalar_bytes = BigInteger256::from(*scalar).to_bytes_le();
+            for window_idx in 0..self.num_windows {
+                let point_idx = get_booth_index(window_idx, self.window_size, &scalar_bytes);
 
                 if point_idx == 0 {
                     continue;
@@ -91,19 +85,15 @@ impl MSMPrecompWindowSigned {
                 // Scale the point index by the window index to figure out whether
                 // we need P, 2^wP, 2^{2w}P, etc
                 let scaled_point_index = window_idx * (1 << (self.window_size - 1)) + point_idx;
+                let sub_table = &self.tables[scalar_idx];
                 let mut point = sub_table[scaled_point_index];
 
                 if !sign {
                     point = -point;
                 }
 
-                points_to_add.push(point);
+                result += point;
             }
-        }
-
-        let mut result = EdwardsProjective::zero();
-        for point in points_to_add {
-            result += point;
         }
 
         Element(result)
