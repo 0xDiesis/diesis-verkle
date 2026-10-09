@@ -9,3 +9,7 @@ Cargo.lock
 bin
 obj
 
+
+/validation-results/
+
+__pycache__/
