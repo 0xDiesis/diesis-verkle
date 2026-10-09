@@ -11,13 +11,16 @@ use crate::transcript::TranscriptProtocol;
 
 use std::collections::HashMap;
 
+pub use crate::streaming::{ProverQueryRef, QueryCommitment, StreamingError, VerifierQueryRef};
 use banderwagon::{trait_defs::*, Element, Fr};
+
 pub struct MultiPoint;
 
 #[derive(Clone, Debug)]
 pub struct ProverQuery {
     pub commitment: Element,
-    pub poly: LagrangeBasis, // TODO: Make this a reference so that upstream libraries do not need to clone
+    /// Owned compatibility input; ProverQueryRef avoids polynomial copies.
+    pub poly: LagrangeBasis,
     // Given a function f, we use z_i to denote the input point and y_i to denote the output, ie f(z_i) = y_i
     pub point: usize,
     pub result: Fr,
@@ -38,7 +41,7 @@ pub struct VerifierQuery {
     pub result: Fr,
 }
 
-//XXX: change to group_prover_queries_by_point
+// Aggregate prover queries by their evaluation point.
 fn group_prover_queries<'a>(
     prover_queries: &'a [ProverQuery],
     challenges: &'a [Fr],
@@ -52,6 +55,33 @@ fn group_prover_queries<'a>(
 }
 
 impl MultiPoint {
+    /// Checked owned convenience API. Prefer borrowed `open_streaming` to avoid
+    /// polynomial copies. Commitment/polynomial correspondence remains the caller's obligation.
+    pub fn try_open(
+        crs: CRS,
+        precomp: &PrecomputedWeights,
+        transcript: &mut Transcript,
+        queries: &[ProverQuery],
+    ) -> Result<MultiPointProof, crate::ProofError> {
+        let commitments: Vec<_> = queries
+            .iter()
+            .map(|q| QueryCommitment::new(q.commitment))
+            .collect();
+        Self::open_streaming(
+            crs,
+            precomp,
+            transcript,
+            queries
+                .iter()
+                .zip(&commitments)
+                .map(|(q, c)| ProverQueryRef {
+                    commitment: c,
+                    poly: &q.poly,
+                    point: q.point,
+                    result: q.result,
+                }),
+        )
+    }
     pub fn open(
         crs: CRS,
         precomp: &PrecomputedWeights,
@@ -162,20 +192,23 @@ impl MultiPoint {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultiPointProof {
-    // TODO: These are now public because the golang code
-    // exposes the proof structure to client devs,
-    // and if we don't expose, then we can't deserialize the json
-    // proof into a MultiPointProof
+    // Public proof fields support structured serialization and external verifiers.
     pub open_proof: IPAProof,
     pub g_x_comm: Element,
 }
 
 impl MultiPointProof {
+    pub const COMPRESSED_SIZE_256: usize = (8 * 2 + 1) * 32 + 32;
+    pub const UNCOMPRESSED_SIZE_256: usize = 8 * 2 * 64 + 32 + 64;
+
     pub fn from_bytes(bytes: &[u8], poly_degree: usize) -> crate::IOResult<MultiPointProof> {
         use crate::{IOError, IOErrorKind};
 
+        if bytes.len() < 32 {
+            return Err(IOError::from(IOErrorKind::InvalidData));
+        }
         let g_x_comm_bytes = &bytes[0..32];
-        let ipa_bytes = &bytes[32..]; // TODO: we should return a Result here incase the user gives us bad bytes
+        let ipa_bytes = &bytes[32..];
         let point: Element =
             Element::from_bytes(g_x_comm_bytes).ok_or(IOError::from(IOErrorKind::InvalidData))?;
         let g_x_comm = point;
@@ -191,15 +224,30 @@ impl MultiPointProof {
         bytes: &[u8],
         poly_degree: usize,
     ) -> crate::IOResult<MultiPointProof> {
+        if bytes.len() < 64 {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
         let g_x_comm_bytes: [u8; 64] = bytes[..64]
             .try_into()
             .expect("Expected a slice of exactly 64 bytes");
-        let ipa_bytes = &bytes[64..]; // TODO: we should return a Result here incase the user gives us bad bytes
+        let ipa_bytes = &bytes[64..];
 
         let g_x_comm = Element::from_bytes_unchecked_uncompressed(g_x_comm_bytes);
 
         let open_proof = IPAProof::from_bytes_unchecked_uncompressed(ipa_bytes, poly_degree)?;
         Ok(MultiPointProof {
+            open_proof,
+            g_x_comm,
+        })
+    }
+    pub fn from_bytes_uncompressed(bytes: &[u8], poly_degree: usize) -> crate::IOResult<Self> {
+        if bytes.len() < 64 {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+        let open_proof = IPAProof::from_bytes_uncompressed(&bytes[64..], poly_degree)?;
+        let g_x_comm = Element::try_from_bytes_uncompressed(bytes[..64].try_into().unwrap())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+        Ok(Self {
             open_proof,
             g_x_comm,
         })
@@ -228,6 +276,12 @@ impl MultiPointProof {
         queries: &[VerifierQuery],
         transcript: &mut Transcript,
     ) -> bool {
+        if queries.is_empty()
+            || !precomp.matches_domain(crs.n)
+            || !self.open_proof.valid_shape(crs, crs.n)
+        {
+            return false;
+        }
         transcript.domain_sep(b"multiproof");
         // 1. Compute `r`
         //
@@ -244,6 +298,9 @@ impl MultiPointProof {
         // 2. Compute `t`
         transcript.append_point(b"D", &self.g_x_comm);
         let t = transcript.challenge_scalar(b"t");
+        if precomp.contains_point(t) || queries.iter().any(|q| q.point == t) {
+            return false;
+        }
 
         // 3. Compute g_2(t)
         //
@@ -272,16 +329,14 @@ impl MultiPointProof {
         let g3_comm = g1_comm - self.g_x_comm;
 
         // Check IPA
-        let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, t); // TODO: we could put this as a method on PrecomputedWeights
+        let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, t);
 
         self.open_proof
             .verify_multiexp(transcript, crs, b, g3_comm, t, g2_t)
     }
 }
 
-// TODO: we could probably get rid of this method altogether and just do this in the multiproof
-// TODO method
-// TODO: check that the point is actually not in the domain
+// Trusted compatibility helper; checked multiproof paths reject domain challenges.
 pub(crate) fn open_point_outside_of_domain(
     crs: CRS,
     precomp: &PrecomputedWeights,

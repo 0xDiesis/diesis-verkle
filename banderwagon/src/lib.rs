@@ -18,7 +18,7 @@ pub use element::{multi_scalar_mul, Element, Fr};
 pub use trait_defs::*;
 pub mod trait_defs {
     pub use ark_ff::{batch_inversion, batch_inversion_and_mul, Field, One, PrimeField, Zero};
-    pub use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
+    pub use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError, Valid};
 }
 
 pub const fn fr_from_u64_limbs(limbs: [u64; 4]) -> Fr {
@@ -37,8 +37,7 @@ pub fn try_reduce_to_element(bytes: &[u8]) -> Option<Element> {
     let mut bytes = [0u8; 32];
     x_coord.serialize_compressed(&mut bytes[..]).unwrap();
 
-    // TODO: this reverse is hacky, and its because there is no way to specify the endianness in arkworks
-    // TODO So we reverse it here, to be interopable with the banderwagon specs which needs big endian bytes
+    // Reverse Arkworks little-endian bytes for the Banderwagon big-endian encoding.
 
     bytes.reverse();
 

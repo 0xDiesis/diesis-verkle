@@ -84,11 +84,9 @@ impl MSMPrecompWindowSigned {
             if scalar.is_zero() {
                 continue;
             }
+            let bigint: BigInteger256 = (*scalar).into();
+            let scalar_bytes = bigint.to_bytes_le();
             for window_idx in 0..self.num_windows {
-                let scalar_bytes = {
-                    let bigint: BigInteger256 = (*scalar).into();
-                    bigint.to_bytes_le()
-                };
                 let point_idx = get_booth_index(window_idx, self.window_size, &scalar_bytes);
 
                 if point_idx == 0 {
@@ -121,7 +119,9 @@ impl MSMPrecompWindowSigned {
     }
 }
 
-// TODO: Link to halo2 file + docs + comments
+// Signed Booth recoding uses one overlapping bit. Rounding half-window bits
+// gives the signed digit; the table stores its absolute multiple and the
+// caller applies its sign. Sum of digit_j * 2^(w*j) recovers the scalar.
 pub fn get_booth_index(window_index: usize, window_size: usize, el: &[u8]) -> i32 {
     // Booth encoding:
     // * step by `window` size
@@ -208,7 +208,7 @@ mod booth_tests {
 
         let got = mul(&s, &gen, 4);
 
-        assert_eq!(Element::from(res), got)
+        assert_eq!(res, got)
     }
 
     fn mul(scalar: &Fr, point: &Element, window: usize) -> Element {
@@ -233,7 +233,7 @@ mod booth_tests {
                 acc_scalar = acc_scalar + acc_scalar;
             }
 
-            let idx = get_booth_index(i as usize, window, u.as_ref());
+            let idx = get_booth_index(i, window, u.as_ref());
 
             if idx.is_negative() {
                 acc += table[idx.unsigned_abs() as usize].neg();
@@ -247,6 +247,6 @@ mod booth_tests {
 
         assert_eq!(acc_scalar, *scalar);
 
-        acc.into()
+        acc
     }
 }
