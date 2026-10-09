@@ -1,3 +1,5 @@
+// Rust 1.70 compatibility: usize::is_multiple_of was stabilized in Rust 1.87.
+#![allow(clippy::manual_is_multiple_of)]
 use banderwagon::{CanonicalDeserialize, CanonicalSerialize};
 use banderwagon::{Element, Fr};
 use ipa_multipoint::{
@@ -7,7 +9,7 @@ use ipa_multipoint::{
 
 use crate::{CommitmentBytes, Error, ScalarBytes};
 
-// TODO: Find a better name for this
+// Commitment bytes, positions, previous scalars and replacement scalars.
 pub type DeserializedSparseCommitmentItem = (
     CommitmentBytes,
     Vec<usize>,
@@ -15,8 +17,7 @@ pub type DeserializedSparseCommitmentItem = (
     Vec<ScalarBytes>,
 );
 
-/// TODO: This method should not be exported. Leave it exported for now, so that its not
-/// a breaking change.
+/// Trusted-input compatibility decoder.
 ///
 /// This is used for deserializing the input for `update_commitment_sparse`.
 pub fn deserialize_update_commitment_sparse(
@@ -61,6 +62,17 @@ pub fn deserialize_update_commitment_sparse(
         indexes.push(*index);
     }
     Ok((commitment_bytes, indexes, old_scalars, new_scalars))
+}
+
+pub(crate) fn checked_commitment(bytes: CommitmentBytes) -> Result<Element, Error> {
+    Element::try_from_bytes_uncompressed(bytes).map_err(|_| Error::CouldNotDeserializeCommitment {
+        bytes: bytes.to_vec(),
+    })
+}
+
+/// Checked alternative to the legacy trusted-input serializer.
+pub fn try_serialize_commitment(commitment: CommitmentBytes) -> Result<[u8; 32], Error> {
+    Ok(checked_commitment(commitment)?.to_bytes())
 }
 
 /// Serializes a commitment to a byte array
@@ -141,6 +153,41 @@ pub fn deserialize_proof_query_uncompressed(bytes: &[u8]) -> ProverQuery {
     }
 }
 
+/// Decodes exactly one compressed verifier query, rejecting malformed encodings.
+pub fn try_deserialize_verifier_query(bytes: &[u8]) -> Result<VerifierQuery, Error> {
+    if bytes.len() != 65 {
+        return Err(Error::ProofVerificationFailed);
+    }
+    let commitment =
+        Element::from_bytes(&bytes[..32]).ok_or_else(|| Error::CouldNotDeserializeCommitment {
+            bytes: bytes[..32].to_vec(),
+        })?;
+    Ok(VerifierQuery {
+        commitment,
+        point: Fr::from(bytes[32] as u128),
+        result: fr_from_le_bytes(&bytes[33..])?,
+    })
+}
+
+/// Decodes exactly one uncompressed verifier query with point validation.
+pub fn try_deserialize_verifier_query_uncompressed(bytes: &[u8]) -> Result<VerifierQuery, Error> {
+    if bytes.len() != 97 {
+        return Err(Error::ProofVerificationFailed);
+    }
+    let mut commitment_bytes = [0u8; 64];
+    commitment_bytes.copy_from_slice(&bytes[..64]);
+    let commitment = Element::try_from_bytes_uncompressed(commitment_bytes).map_err(|_| {
+        Error::CouldNotDeserializeCommitment {
+            bytes: commitment_bytes.to_vec(),
+        }
+    })?;
+    Ok(VerifierQuery {
+        commitment,
+        point: Fr::from(bytes[64] as u128),
+        result: fr_from_le_bytes(&bytes[65..])?,
+    })
+}
+
 #[must_use]
 pub fn deserialize_verifier_query(bytes: &[u8]) -> VerifierQuery {
     // Commitment
@@ -219,6 +266,11 @@ pub fn fr_to_le_bytes(fr: banderwagon::Fr) -> [u8; 32] {
     bytes
 }
 pub fn fr_from_le_bytes(bytes: &[u8]) -> Result<banderwagon::Fr, Error> {
+    if bytes.len() != 32 {
+        return Err(Error::FailedToDeserializeScalar {
+            bytes: bytes.to_vec(),
+        });
+    }
     banderwagon::Fr::deserialize_uncompressed(bytes).map_err(|_| Error::FailedToDeserializeScalar {
         bytes: bytes.to_vec(),
     })
