@@ -734,7 +734,7 @@ fn path_difference(key_a: [u8; 31], key_b: [u8; 31]) -> (Vec<u8>, Option<u8>, Op
 
     let mut same_path_indices = Vec::with_capacity(AVERAGE_NUMBER_OF_SHARED_INDICES);
 
-    for (p_a, p_b) in key_a.into_iter().zip(key_b.into_iter()) {
+    for (p_a, p_b) in key_a.into_iter().zip(key_b) {
         if p_a != p_b {
             return (same_path_indices, Some(p_a), Some(p_b));
         }
