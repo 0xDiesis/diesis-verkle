@@ -52,11 +52,11 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
-            os: ubuntu-latest
+            os: macos-14
           - target: x86_64-apple-darwin
-            os: ubuntu-latest
+            os: macos-15-intel
           - target: x86_64-pc-windows-gnu
             os: windows-latest
     steps:
@@ -64,28 +64,34 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.80.0
           targets: ${{ matrix.target }}
-      - name: Install cargo-binstall
-        uses: taiki-e/install-action@cargo-binstall
       - name: Install Zig
+        if: runner.os == 'Linux'
         uses: goto-bus-stop/setup-zig@v2
         with:
-          version: 0.10.1
+          version: 0.13.0
       - name: Install cargo-zigbuild
-        run: cargo binstall --no-confirm cargo-zigbuild
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
       - name: Run compile script
         run: |
           chmod +x .github/scripts/compile_all_targets_java.sh
-          .github/scripts/compile_all_targets_java.sh ${{ matrix.target }}
+          if [ "${{ runner.os }}" = Linux ]; then
+            GLIBC_VERSION=2.17 .github/scripts/compile_all_targets_java.sh ${{ matrix.target }} zigbuild
+          else
+            .github/scripts/compile_all_targets_java.sh ${{ matrix.target }} cargo
+          fi
         shell: bash
       - name: Upload dynamic libs
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
           path: bindings/java/java_code/src/main/resources/${{ matrix.target }}
+          if-no-files-found: error
 
   test:
     name: Test - ${{ matrix.target }}
@@ -96,9 +102,9 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
-            os: linux-arm64
+            os: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
           - target: aarch64-apple-darwin
             os: macos-14
           - target: x86_64-pc-windows-gnu
@@ -122,13 +128,13 @@ jobs:
         run: ./gradlew build -x test
         working-directory: bindings/java/java_code
       - name: Run Gradle tests
-        run: ./gradlew test --info --stacktrace --scan
+        run: ./gradlew test --info --stacktrace
         working-directory: bindings/java/java_code
 
   publish:
     name: Publish
     if: ${{ inputs.release-type != 'none' && github.event_name == 'workflow_dispatch' }}
-    needs: [build, test]
+    needs: [format, build, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

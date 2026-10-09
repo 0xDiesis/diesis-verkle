@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -14,22 +15,23 @@ if [ $# -eq 0 ]; then
 fi
 
 TARGET=$1
+BUILD_TOOL="${2:-zigbuild}"
 
 case $TARGET in
     "x86_64-unknown-linux-gnu")
-        $PROJECT_ROOT/scripts/compile_to_native.sh Linux x86_64 $LIB_NAME $LIB_TYPE $OUT_DIR zigbuild
+        "$PROJECT_ROOT/scripts/compile_to_native.sh" Linux x86_64 "$LIB_NAME" "$LIB_TYPE" "$OUT_DIR" "$BUILD_TOOL"
         ;;
     "aarch64-unknown-linux-gnu")
-        $PROJECT_ROOT/scripts/compile_to_native.sh Linux arm64 $LIB_NAME $LIB_TYPE $OUT_DIR zigbuild
+        "$PROJECT_ROOT/scripts/compile_to_native.sh" Linux arm64 "$LIB_NAME" "$LIB_TYPE" "$OUT_DIR" "$BUILD_TOOL"
         ;;
     "aarch64-apple-darwin")
-        $PROJECT_ROOT/scripts/compile_to_native.sh Darwin arm64 $LIB_NAME $LIB_TYPE $OUT_DIR zigbuild
+        "$PROJECT_ROOT/scripts/compile_to_native.sh" Darwin arm64 "$LIB_NAME" "$LIB_TYPE" "$OUT_DIR" "$BUILD_TOOL"
         ;;
     "x86_64-apple-darwin")
-        $PROJECT_ROOT/scripts/compile_to_native.sh Darwin x86_64 $LIB_NAME $LIB_TYPE $OUT_DIR zigbuild
+        "$PROJECT_ROOT/scripts/compile_to_native.sh" Darwin x86_64 "$LIB_NAME" "$LIB_TYPE" "$OUT_DIR" "$BUILD_TOOL"
         ;;
     "x86_64-pc-windows-gnu")
-        $PROJECT_ROOT/scripts/compile_to_native.sh Windows x86_64 $LIB_NAME $LIB_TYPE $OUT_DIR
+        "$PROJECT_ROOT/scripts/compile_to_native.sh" Windows x86_64 "$LIB_NAME" "$LIB_TYPE" "$OUT_DIR"
         ;;
     *)
         echo "Unsupported target: $TARGET"

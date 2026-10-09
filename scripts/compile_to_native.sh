@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # Function to display usage information
 usage() {
@@ -26,7 +27,7 @@ usage() {
 }
 
 # Check for help flag
-if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     usage
 fi
 
@@ -41,6 +42,10 @@ LIB_NAME="${3:-c_verkle}"
 LIB_TYPE="${4:-both}"
 OUT_DIR="${5:-$PROJECT_ROOT/bindings/c/build}"
 BUILD_TOOL="${6:-cargo}"
+BUILD_TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"
+if [[ "$BUILD_TARGET_DIR" != /* && "$BUILD_TARGET_DIR" != ?:* ]]; then
+    BUILD_TARGET_DIR="$PROJECT_ROOT/$BUILD_TARGET_DIR"
+fi
 echo "Detected/Provided OS: $OS"
 echo "Detected/Provided architecture: $ARCH"
 echo "Library name: $LIB_NAME"
@@ -56,7 +61,7 @@ TARGET_NAME=""
 check_rust_target_installed() {
     local target=$1
     echo "Compiling for target: $target"
-    $SCRIPT_DIR/check_if_rustup_target_installed.sh $target
+    "$SCRIPT_DIR/check_if_rustup_target_installed.sh" "$target"
 
     # Check the exit code 
     if [ $? -eq 0 ]; then
@@ -122,8 +127,7 @@ case "$OS" in
                 ;;
         esac
         ;;
-        # Github runners will return MINGW64_NT-10.0-20348
-        # so we add a wildcard to match the prefix
+        # Match Windows shell OS names by prefix.
     MINGW64_NT-*|CYGWIN_NT-*|"Windows")
         TARGET_NAME="x86_64-pc-windows-gnu"
         STATIC_LIB_NAME="lib${LIB_NAME}.a"
@@ -139,9 +143,13 @@ esac
 do_build() {
     local target=$1
     if [ "$BUILD_TOOL" == "zigbuild" ]; then
-        cargo zigbuild --release --target=$target
+        local build_target="$target"
+        if [[ "$OS" == "Linux" && -n "${GLIBC_VERSION:-}" ]]; then
+            build_target="$target.$GLIBC_VERSION"
+        fi
+        cargo zigbuild --manifest-path "$PROJECT_ROOT/Cargo.toml" --release --target "$build_target" --target-dir "$BUILD_TARGET_DIR"
     else
-        cargo build --release --target=$target
+        cargo build --manifest-path "$PROJECT_ROOT/Cargo.toml" --release --target "$target" --target-dir "$BUILD_TARGET_DIR"
     fi
 }
 
@@ -155,13 +163,17 @@ if [[ "$ARCH" == "universal" ]]; then
 
     # Create the universal binary
     mkdir -p "$OUT_DIR/$TARGET_NAME"
-    lipo -create -output "$OUT_DIR/$TARGET_NAME/$STATIC_LIB_NAME" \
-        "$PROJECT_ROOT/target/x86_64-apple-darwin/release/$STATIC_LIB_NAME" \
-        "$PROJECT_ROOT/target/aarch64-apple-darwin/release/$STATIC_LIB_NAME"
+    if [ "$LIB_TYPE" == "static" ] || [ "$LIB_TYPE" == "both" ]; then
+        lipo -create -output "$OUT_DIR/$TARGET_NAME/$STATIC_LIB_NAME" \
+            "$BUILD_TARGET_DIR/x86_64-apple-darwin/release/$STATIC_LIB_NAME" \
+            "$BUILD_TARGET_DIR/aarch64-apple-darwin/release/$STATIC_LIB_NAME"
+    fi
 
-    lipo -create -output "$OUT_DIR/$TARGET_NAME/$DYNAMIC_LIB_NAME" \
-        "$PROJECT_ROOT/target/x86_64-apple-darwin/release/$DYNAMIC_LIB_NAME" \
-        "$PROJECT_ROOT/target/aarch64-apple-darwin/release/$DYNAMIC_LIB_NAME"
+    if [ "$LIB_TYPE" == "dynamic" ] || [ "$LIB_TYPE" == "both" ]; then
+        lipo -create -output "$OUT_DIR/$TARGET_NAME/$DYNAMIC_LIB_NAME" \
+            "$BUILD_TARGET_DIR/x86_64-apple-darwin/release/$DYNAMIC_LIB_NAME" \
+            "$BUILD_TARGET_DIR/aarch64-apple-darwin/release/$DYNAMIC_LIB_NAME"
+    fi
 else
     check_rust_target_installed "$TARGET_NAME"
     do_build "$TARGET_NAME"
@@ -171,11 +183,11 @@ else
 
     # Copy the libraries to the specified output directory
     if [ "$LIB_TYPE" == "static" ] || [ "$LIB_TYPE" == "both" ]; then
-        cp -R "$PROJECT_ROOT/target/$TARGET_NAME/release/$STATIC_LIB_NAME" "$OUT_DIR/$TARGET_NAME/"
+        cp -R "$BUILD_TARGET_DIR/$TARGET_NAME/release/$STATIC_LIB_NAME" "$OUT_DIR/$TARGET_NAME/"
     fi
 
     if [ "$LIB_TYPE" == "dynamic" ] || [ "$LIB_TYPE" == "both" ]; then
-        cp -R "$PROJECT_ROOT/target/$TARGET_NAME/release/$DYNAMIC_LIB_NAME" "$OUT_DIR/$TARGET_NAME/"
+        cp -R "$BUILD_TARGET_DIR/$TARGET_NAME/release/$DYNAMIC_LIB_NAME" "$OUT_DIR/$TARGET_NAME/"
     fi
 fi
 
