@@ -1,0 +1,45 @@
+name: IPA correctness
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        overflow: [true, false]
+    env:
+      CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: ${{ matrix.overflow }}
+      RAYON_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --all -- --check
+      - run: cargo test --release -p banderwagon --no-default-features
+      - run: cargo test --release -p banderwagon -p ipa-multipoint -p ffi_interface -p c_verkle
+  crosscheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: validation/go-ipa/go.mod
+          cache-dependency-path: validation/go-ipa/go.sum
+      - run: mkdir -p validation-results
+      - run: go run . > ../../validation-results/go.jsonl
+        working-directory: validation/go-ipa
+      - run: cargo run --release -p ipa-multipoint --example crosscheck -- validation-results/go.jsonl > validation-results/rust.jsonl
+      - run: go run . ../../validation-results/rust.jsonl > ../../validation-results/reciprocal.jsonl
+        working-directory: validation/go-ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipa-crosscheck
+          path: validation-results
