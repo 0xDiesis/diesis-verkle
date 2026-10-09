@@ -1,6 +1,13 @@
+// Rust 1.70 compatibility: usize::is_multiple_of was stabilized in Rust 1.87.
+#![allow(clippy::manual_is_multiple_of)]
+//! C callers must provide a live Context pointer and readable buffers covering their declared
+//! lengths (and writable output buffers of each operation's documented size). Null and length
+//! guards do not validate arbitrary pointers, lifetimes, allocation bounds, or concurrent access.
+//! Raw-return arithmetic and proof creation retain their ABI and trusted-input contract.
+
 use ffi_interface::{
-    deserialize_proof_query, deserialize_proof_query_uncompressed, deserialize_verifier_query,
-    deserialize_verifier_query_uncompressed, fr_from_le_bytes, Context,
+    deserialize_proof_query, deserialize_proof_query_uncompressed, fr_from_le_bytes,
+    try_deserialize_verifier_query, try_deserialize_verifier_query_uncompressed, Context,
 };
 use ipa_multipoint::committer::Committer;
 use ipa_multipoint::multiproof::{MultiPoint, MultiPointProof, ProverQuery, VerifierQuery};
@@ -37,8 +44,7 @@ pub extern "C" fn pedersen_hash(
     out: *mut u8,
 ) {
     if ctx.is_null() || address.is_null() || tree_index_le.is_null() || out.is_null() {
-        // TODO: We have ommited the error handling for null pointers at the moment.
-        // TODO: Likely will panic in this case.
+        // Non-null pointers must refer to a live context created by this library.
         return;
     }
 
@@ -95,7 +101,7 @@ pub extern "C" fn multi_scalar_mul(
 #[no_mangle]
 pub extern "C" fn create_proof(ctx: *mut Context, input: *const u8, len: usize, out: *mut u8) {
     const CHUNK_SIZE: usize = 8257; // TODO: get this from ipa-multipoint
-    const PROOF_SIZE: usize = 576; // TODO: get this from ipa-multipoint
+    const PROOF_SIZE: usize = MultiPointProof::COMPRESSED_SIZE_256;
 
     let (scalar_slice, context) = unsafe {
         let scalar = std::slice::from_raw_parts(input, len);
@@ -127,7 +133,7 @@ pub extern "C" fn create_proof(ctx: *mut Context, input: *const u8, len: usize, 
     let mut transcript = Transcript::new(b"verkle");
 
     let proof = MultiPoint::open(
-        // TODO: This should not need to clone the CRS, but instead take a reference
+        // The owned proof API consumes a cloned CRS.
         context.crs.clone(),
         &context.precomputed_weights,
         &mut transcript,
@@ -151,7 +157,7 @@ pub extern "C" fn create_proof_uncompressed(
 ) {
     // 8257 + 32 because first commitment is uncompressed as 64 bytes
     const CHUNK_SIZE: usize = 8289; // TODO: get this from ipa-multipoint
-    const PROOF_SIZE: usize = 1120; // TODO: get this from ipa-multipoint
+    const PROOF_SIZE: usize = MultiPointProof::UNCOMPRESSED_SIZE_256;
 
     let (scalar_slice, context) = unsafe {
         let scalar = std::slice::from_raw_parts(input, len);
@@ -183,7 +189,7 @@ pub extern "C" fn create_proof_uncompressed(
     let mut transcript = Transcript::new(b"verkle");
 
     let proof = MultiPoint::open(
-        // TODO: This should not need to clone the CRS, but instead take a reference
+        // The owned proof API consumes a cloned CRS.
         context.crs.clone(),
         &context.precomputed_weights,
         &mut transcript,
@@ -202,8 +208,17 @@ pub extern "C" fn create_proof_uncompressed(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn verify_proof(ctx: *mut Context, input: *const u8, len: usize) -> bool {
-    const CHUNK_SIZE: usize = 65; // TODO: get this from ipa-multipoint
-    const PROOF_SIZE: usize = 576; // TODO: get this from ipa-multipoint
+    const CHUNK_SIZE: usize = 32 + 1 + 32;
+    const PROOF_SIZE: usize = MultiPointProof::COMPRESSED_SIZE_256;
+
+    if ctx.is_null()
+        || input.is_null()
+        || len <= PROOF_SIZE
+        || len > isize::MAX as usize
+        || (len - PROOF_SIZE) % CHUNK_SIZE != 0
+    {
+        return false;
+    }
 
     let (proof_slice, verifier_queries_slices, context) = unsafe {
         let input_slice = std::slice::from_raw_parts(input, len);
@@ -216,12 +231,8 @@ pub extern "C" fn verify_proof(ctx: *mut Context, input: *const u8, len: usize) 
     };
 
     let verifier_queries_bytes = verifier_queries_slices.chunks_exact(CHUNK_SIZE);
-    assert!(
-        verifier_queries_bytes.remainder().is_empty(),
-        "There should be no left over bytes when chunking the verifier queries"
-    );
 
-    let num_openings = verifier_queries_bytes.len() / CHUNK_SIZE;
+    let num_openings = verifier_queries_bytes.len();
 
     // - Deserialize verifier queries
     //
@@ -229,22 +240,26 @@ pub extern "C" fn verify_proof(ctx: *mut Context, input: *const u8, len: usize) 
     let mut verifier_queries: Vec<VerifierQuery> = Vec::with_capacity(num_openings);
 
     for verifier_query_bytes in verifier_queries_bytes {
-        let verifier_query = deserialize_verifier_query(verifier_query_bytes);
+        let verifier_query = match try_deserialize_verifier_query(verifier_query_bytes) {
+            Ok(query) => query,
+            Err(_) => return false,
+        };
         verifier_queries.push(verifier_query);
     }
 
     // - Check proof
     //
 
-    let proof = MultiPointProof::from_bytes(proof_slice, 256).unwrap();
+    let proof = match MultiPointProof::from_bytes(proof_slice, 256) {
+        Ok(proof) => proof,
+        Err(_) => return false,
+    };
 
     let mut transcript = Transcript::new(b"verkle");
 
-    // TODO: This should not need to clone the CRS, but instead take a reference
-
     MultiPointProof::check(
         &proof,
-        &context.crs.clone(),
+        &context.crs,
         &context.precomputed_weights,
         &verifier_queries,
         &mut transcript,
@@ -258,9 +273,18 @@ pub extern "C" fn verify_proof_uncompressed(
     input: *const u8,
     len: usize,
 ) -> bool {
-    // Chunk is now 65 + 32 = 97 because first commitment is uncompressed as 64 bytes
-    const CHUNK_SIZE: usize = 97; // TODO: get this from ipa-multipoint
-    const PROOF_SIZE: usize = 1120; // TODO: get this from ipa-multipoint
+    // Each record contains a 64-byte commitment, one position byte and a 32-byte scalar.
+    const CHUNK_SIZE: usize = 64 + 1 + 32;
+    const PROOF_SIZE: usize = MultiPointProof::UNCOMPRESSED_SIZE_256;
+
+    if ctx.is_null()
+        || input.is_null()
+        || len <= PROOF_SIZE
+        || len > isize::MAX as usize
+        || (len - PROOF_SIZE) % CHUNK_SIZE != 0
+    {
+        return false;
+    }
 
     let (proof_slice, verifier_queries_slices, context) = unsafe {
         let input_slice = std::slice::from_raw_parts(input, len);
@@ -273,12 +297,8 @@ pub extern "C" fn verify_proof_uncompressed(
     };
 
     let verifier_queries_bytes = verifier_queries_slices.chunks_exact(CHUNK_SIZE);
-    assert!(
-        verifier_queries_bytes.remainder().is_empty(),
-        "There should be no left over bytes when chunking the verifier queries"
-    );
 
-    let num_openings = verifier_queries_bytes.len() / CHUNK_SIZE;
+    let num_openings = verifier_queries_bytes.len();
 
     // - Deserialize verifier queries
     //
@@ -286,22 +306,27 @@ pub extern "C" fn verify_proof_uncompressed(
     let mut verifier_queries: Vec<VerifierQuery> = Vec::with_capacity(num_openings);
 
     for verifier_query_bytes in verifier_queries_bytes {
-        let verifier_query = deserialize_verifier_query_uncompressed(verifier_query_bytes);
+        let verifier_query = match try_deserialize_verifier_query_uncompressed(verifier_query_bytes)
+        {
+            Ok(query) => query,
+            Err(_) => return false,
+        };
         verifier_queries.push(verifier_query);
     }
 
     // - Check proof
     //
 
-    let proof = MultiPointProof::from_bytes_unchecked_uncompressed(proof_slice, 256).unwrap();
+    let proof = match MultiPointProof::from_bytes_uncompressed(proof_slice, 256) {
+        Ok(proof) => proof,
+        Err(_) => return false,
+    };
 
     let mut transcript = Transcript::new(b"verkle");
 
-    // TODO: This should not need to clone the CRS, but instead take a reference
-
     MultiPointProof::check(
         &proof,
-        &context.crs.clone(),
+        &context.crs,
         &context.precomputed_weights,
         &verifier_queries,
         &mut transcript,

@@ -71,8 +71,20 @@ pub struct PrecomputedWeights {
 }
 
 impl PrecomputedWeights {
+    pub fn matches_domain(&self, domain: usize) -> bool {
+        domain.is_power_of_two()
+            && domain.checked_mul(2) == Some(self.barycentric_weights.len())
+            && (domain - 1).checked_mul(2) == Some(self.inverted_domain.len())
+    }
+    pub(crate) fn contains_point(&self, point: Fr) -> bool {
+        (0..self.barycentric_weights.len() / 2).any(|i| point == Fr::from(i as u128))
+    }
     // domain_size is 256 in our case
     pub fn new(domain_size: usize) -> PrecomputedWeights {
+        assert!(
+            domain_size.is_power_of_two(),
+            "domain must be a nonzero power of two"
+        );
         let mut barycentric_weights = vec![Fr::zero(); domain_size * 2];
         let midpoint = domain_size;
         for x_i in 0..domain_size {
@@ -208,6 +220,11 @@ impl LagrangeBasis {
         domain_size: usize,
         point: Fr,
     ) -> Vec<Fr> {
+        if let Some(index) = (0..domain_size).find(|i| point == Fr::from(*i as u128)) {
+            let mut coefficients = vec![Fr::zero(); domain_size];
+            coefficients[index] = Fr::one();
+            return coefficients;
+        }
         let mut lagrange_evaluations: Vec<_> = (0..domain_size)
             .map(|i| precomp.get_barycentric_weight(i) * (point - Fr::from(i as u128)))
             .collect();
@@ -404,5 +421,17 @@ mod tests {
         }
 
         Some(coeffs)
+    }
+}
+
+#[test]
+fn on_domain_lagrange_coefficients_are_kronecker_vectors() {
+    let precomp = PrecomputedWeights::new(256);
+    for k in 0..256 {
+        let coefficients =
+            LagrangeBasis::evaluate_lagrange_coefficients(&precomp, 256, Fr::from(k as u64));
+        for (i, value) in coefficients.iter().enumerate() {
+            assert_eq!(*value, if i == k { Fr::one() } else { Fr::zero() });
+        }
     }
 }

@@ -34,7 +34,7 @@ pub fn keccak_32bytes(c: &mut Criterion) {
                 (keccak, rand_buffer)
             },
             |(mut keccak, rand_buffer)| {
-                keccak.update(&rand_buffer);
+                keccak.update(rand_buffer);
                 keccak.finalize()
             },
         )
@@ -43,7 +43,7 @@ pub fn keccak_32bytes(c: &mut Criterion) {
 
 fn random_point(seed: u64, num_points: usize) -> Vec<Element> {
     (0..num_points)
-        .map(|i| Element::prime_subgroup_generator() * Fr::from((seed + i as u64 + 1) as u64))
+        .map(|i| Element::prime_subgroup_generator() * Fr::from(seed + i as u64 + 1))
         .collect()
 }
 fn random_scalars(num_points: usize, num_bytes: usize) -> Vec<Fr> {

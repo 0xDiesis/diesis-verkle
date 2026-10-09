@@ -45,8 +45,7 @@ impl MSMPrecompWnaf {
 
         Element(result)
     }
-    // TODO: This requires more benchmarking and feedback to see if we should
-    // TODO put this behind a config flag
+    // Parallel fixed-base MSM; dispatch costs depend on the workload size.
     pub fn mul_par(&self, scalars: &[Fr]) -> Element {
         let wnaf_context = WnafContext::new(self.window_size);
         let result: EdwardsProjective = scalars

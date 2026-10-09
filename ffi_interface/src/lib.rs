@@ -1,7 +1,8 @@
+// Rust 1.70 compatibility: usize::is_multiple_of was stabilized in Rust 1.87.
+#![allow(clippy::manual_is_multiple_of)]
 pub mod serialization;
 
-// TODO: These are re-exported to not break the java code
-// TODO: we ideally don't want to export these.
+// Curve types are part of the public binding interface.
 // - deserialize_update_commitment_sparse should not be exported and is an abstraction leak
 pub use serialization::{
     deserialize_commitment, deserialize_update_commitment_sparse, serialize_commitment,
@@ -19,7 +20,8 @@ use verkle_trie::proof::golang_proof_format::{bytes32_to_element, hex_to_bytes32
 
 pub use crate::serialization::{
     deserialize_proof_query, deserialize_proof_query_uncompressed, deserialize_verifier_query,
-    deserialize_verifier_query_uncompressed,
+    deserialize_verifier_query_uncompressed, try_deserialize_verifier_query,
+    try_deserialize_verifier_query_uncompressed,
 };
 
 /// Context holds all of the necessary components needed for cryptographic operations
@@ -93,7 +95,7 @@ pub enum Error {
 }
 
 #[allow(deprecated)]
-#[deprecated(note = "moving forward one should implement this method on the caller side")]
+#[deprecated(note = "Construct tree keys in the caller.")]
 /// Compute the key prefix used in the `get_tree_key` method
 ///
 /// Returns a 32 byte slice representing the first 31 bytes of the `key` to be used in `get_tree_key`
@@ -111,19 +113,16 @@ pub fn get_tree_key_hash(
     get_tree_key_hash_flat_input(context, input)
 }
 
-#[deprecated(note = "moving forward one should implement this method on the caller side")]
+#[deprecated(note = "Construct tree keys in the caller.")]
 /// Same method as `get_tree_key_hash` but takes a 64 byte input instead of two 32 byte inputs
 ///
-/// This is kept for backwards compatibility and because we have not yet checked if its better
-/// for Java to pass in two 32 bytes or one 64 byte input.
-///
-/// The former probably requires two allocations, while the latter is less type safe.
+/// Compatibility entry point accepting a contiguous address/index pair.
 pub fn get_tree_key_hash_flat_input(context: &Context, input: [u8; 64]) -> [u8; 32] {
     verkle_spec::hash64(&context.committer, input).to_fixed_bytes()
 }
 
 #[allow(deprecated)]
-#[deprecated(note = "moving forward one should implement this method on the caller side")]
+#[deprecated(note = "Construct tree keys in the caller.")]
 pub fn get_tree_key(
     context: &Context,
     address: [u8; 32],
@@ -138,11 +137,11 @@ pub fn get_tree_key(
 }
 
 #[allow(deprecated)]
-#[deprecated(note = "moving forward one should implement this method on the caller side")]
+#[deprecated(note = "Construct tree keys in the caller.")]
 /// This is exactly the same as `get_tree_key_hash` method.
 /// Use get_tree_key_hash instead.
 ///
-/// Moving to rename this as it causes confusion. For now, I'll call this `get_tree_key_hash`
+/// Compatibility alias for tree-key hashing.
 pub fn pedersen_hash(context: &Context, address: [u8; 32], tree_index_le: [u8; 32]) -> [u8; 32] {
     get_tree_key_hash(context, address, tree_index_le)
 }
@@ -179,6 +178,24 @@ fn _commit_to_scalars(context: &Context, scalars: &[u8]) -> Result<Element, Erro
 pub fn commit_to_scalars(context: &Context, scalars: &[u8]) -> Result<CommitmentBytes, Error> {
     let commitment = _commit_to_scalars(context, scalars)?;
     Ok(commitment.to_bytes_uncompressed())
+}
+
+/// Checked alternative to the legacy trusted-input commitment addition.
+pub fn try_add_commitment(
+    lhs: CommitmentBytes,
+    rhs: CommitmentBytes,
+) -> Result<CommitmentBytes, Error> {
+    Ok(
+        (serialization::checked_commitment(lhs)? + serialization::checked_commitment(rhs)?)
+            .to_bytes_uncompressed(),
+    )
+}
+
+/// Checked alternative to the legacy trusted-input commitment hash.
+pub fn try_hash_commitment(commitment: CommitmentBytes) -> Result<ScalarBytes, Error> {
+    Ok(fr_to_le_bytes(
+        serialization::checked_commitment(commitment)?.map_to_scalar_field(),
+    ))
 }
 
 /// Adds two commitments together
@@ -253,9 +270,7 @@ pub fn update_commitment_sparse(
 ///
 /// Returns a `Scalar` representing the hash of the commitment
 pub fn hash_commitment(commitment: CommitmentBytes) -> ScalarBytes {
-    // TODO: We could introduce a method named `hash_commit_to_scalars`
-    // TODO: which would save this serialization roundtrip. We should profile/check that
-    // TODO: this is actually a bottleneck for the average workflow before doing this.
+    // Commitment hashes are converted to scalar encodings through the public byte format.
     fr_to_le_bytes(Element::from_bytes_unchecked_uncompressed(commitment).map_to_scalar_field())
 }
 /// Hashes a vector of commitments.
@@ -323,7 +338,7 @@ pub fn create_proof(context: &Context, input: Vec<u8>) -> Result<Vec<u8>, Error>
     let mut transcript = Transcript::new(b"verkle");
 
     let proof = MultiPoint::open(
-        // TODO: This should not need to clone the CRS, but instead take a reference
+        // The owned proof API consumes a cloned CRS.
         context.crs.clone(),
         &context.precomputed_weights,
         &mut transcript,
@@ -339,14 +354,18 @@ pub fn create_proof(context: &Context, input: Vec<u8>) -> Result<Vec<u8>, Error>
 /// y_i is the evaluation of the polynomial at z_i i.e value we are opening: 32 bytes or Fr (scalar field element)
 /// Returns true of false.
 /// Proof is verified or not.
-/// TODO: Add more tests.
+/// Malformed encodings return errors; query/proof validation is covered by integration tests.
 pub fn verify_proof(context: &Context, input: Vec<u8>) -> Result<(), Error> {
     // Proof bytes are 576 bytes
     // First 32 bytes is the g_x_comm_bytes
     // Next 544 bytes are part of IPA proof. Domain size is always 256. Explanation is in IPAProof::from_bytes().
+    if input.len() < 576 {
+        return Err(Error::ProofVerificationFailed);
+    }
     let proof_bytes = &input[0..576];
 
-    let proof = MultiPointProof::from_bytes(proof_bytes, 256).unwrap();
+    let proof = MultiPointProof::from_bytes(proof_bytes, 256)
+        .map_err(|_| Error::ProofVerificationFailed)?;
 
     let verifier_queries_bytes = &input[576..];
 
@@ -364,13 +383,13 @@ pub fn verify_proof(context: &Context, input: Vec<u8>) -> Result<(), Error> {
     let num_openings = verifier_queries_bytes.len() / CHUNK_SIZE;
 
     // Create an iterator over the input Vec<u8>
-    let chunked_verifier_queries = verifier_queries_bytes.chunks(CHUNK_SIZE);
+    let chunked_verifier_queries = verifier_queries_bytes.chunks_exact(CHUNK_SIZE);
 
     // - Deserialize verifier queries
     let mut verifier_queries: Vec<VerifierQuery> = Vec::with_capacity(num_openings);
 
     for verifier_query_bytes in chunked_verifier_queries {
-        let verifier_query = deserialize_verifier_query(verifier_query_bytes);
+        let verifier_query = try_deserialize_verifier_query(verifier_query_bytes)?;
         verifier_queries.push(verifier_query);
     }
 

@@ -1,5 +1,5 @@
 use crate::{default_crs, ipa::slow_vartime_multiscalar_mul, lagrange_basis::LagrangeBasis};
-use banderwagon::{try_reduce_to_element, Element};
+use banderwagon::{trait_defs::Valid, try_reduce_to_element, Element};
 
 #[allow(non_snake_case)]
 #[derive(Debug, Clone)]
@@ -16,11 +16,55 @@ impl Default for CRS {
 }
 
 impl CRS {
+    /// Validate externally supplied CRS parameters once at the trust boundary.
+    /// This cannot establish that their discrete-log relations are unknown.
+    pub fn validate(&self) -> std::io::Result<()> {
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidData);
+        if !self.n.is_power_of_two() || self.G.len() != self.n {
+            return Err(invalid());
+        }
+        let mut seen = std::collections::HashSet::with_capacity(self.n + 1);
+        for point in self.G.iter().chain(std::iter::once(&self.Q)) {
+            point.check().map_err(|_| invalid())?;
+            if point.is_zero() || !seen.insert(point.to_bytes()) {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+    pub fn try_from_bytes(bytes: &[[u8; 64]]) -> std::io::Result<Self> {
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidData);
+        let (q, g) = bytes.split_last().ok_or_else(invalid)?;
+        if !g.len().is_power_of_two() {
+            return Err(invalid());
+        }
+        let crs = Self {
+            n: g.len(),
+            G: g.iter()
+                .map(|b| Element::try_from_bytes_uncompressed(*b).map_err(|_| invalid()))
+                .collect::<std::io::Result<_>>()?,
+            Q: Element::try_from_bytes_uncompressed(*q).map_err(|_| invalid())?,
+        };
+        crs.validate()?;
+        Ok(crs)
+    }
+    pub fn try_from_hex(hex_encoded_crs: &[&str]) -> std::io::Result<Self> {
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidData);
+        let bytes = hex_encoded_crs
+            .iter()
+            .map(|s| {
+                hex::decode(s)
+                    .map_err(|_| invalid())?
+                    .try_into()
+                    .map_err(|_| invalid())
+            })
+            .collect::<std::io::Result<Vec<[u8; 64]>>>()?;
+        Self::try_from_bytes(&bytes)
+    }
+
     #[allow(non_snake_case)]
     pub fn new(n: usize, seed: &'static [u8]) -> CRS {
-        // TODO generate the Q value from the seed also
-        // TODO: this will also make assert_dedup work as expected
-        // TODO: since we should take in `Q` too
+        // G is seed-derived; Q is the fixed generator used by the protocol.
         let G: Vec<_> = generate_random_elements(n, seed).into_iter().collect();
         let Q = Element::prime_subgroup_generator();
 
@@ -116,8 +160,7 @@ fn generate_random_elements(num_required_points: usize, seed: &'static [u8]) -> 
 
 #[test]
 fn crs_consistency() {
-    // TODO: update hackmd as we are now using banderwagon and the point finding strategy
-    // TODO is a bit different
+    // Hash candidate encodings until enough valid Banderwagon elements are found.
     // See: https://hackmd.io/1RcGSMQgT4uREaq1CCx_cg#Methodology
 
     use sha2::{Digest, Sha256};

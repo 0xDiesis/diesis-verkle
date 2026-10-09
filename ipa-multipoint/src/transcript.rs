@@ -9,27 +9,38 @@ pub trait TranscriptProtocol {
 
 use sha2::{Digest, Sha256};
 pub struct Transcript {
-    state: Vec<u8>,
+    state: Sha256,
+    #[cfg(test)]
+    forced: Option<(&'static [u8], Fr)>,
 }
 
 impl Transcript {
     pub fn new(label: &'static [u8]) -> Transcript {
-        // TODO: add a with capacity method, so we don't reallocate alot
-        let mut state = Vec::new();
-        state.extend(label);
-        Transcript { state }
+        let mut state = Sha256::new();
+        state.update(label);
+        Transcript {
+            state,
+            #[cfg(test)]
+            forced: None,
+        }
     }
 
-    fn append_message(&mut self, message: &[u8], label: &'static [u8]) {
-        self.state.extend(label);
-        self.state.extend(message);
+    #[cfg(test)]
+    pub(crate) fn force_challenge(&mut self, label: &'static [u8], value: Fr) {
+        self.forced = Some((label, value));
     }
-    // TODO: Add this to the other implementations! or most likely, we just need to add
-    // TODO sub protocol specific domain separators ipa_domain_sep(n) and under the roof
-    // TODO it adds the ipa label and the argument size n
+    fn append_message(&mut self, message: &[u8], label: &'static [u8]) {
+        self.state.update(label);
+        self.state.update(message);
+    }
+    // Only upstream-owned canonical encodings may use this path.
+    pub(crate) fn append_point_bytes(&mut self, label: &'static [u8], bytes: &[u8; 32]) {
+        self.append_message(bytes, label);
+    }
+    // Caller-supplied labels separate transcript messages.
     pub fn append_u64(&mut self, label: &'static [u8], number: u64) {
-        self.state.extend(label);
-        self.state.extend(number.to_be_bytes());
+        self.state.update(label);
+        self.state.update(number.to_be_bytes());
     }
 }
 
@@ -37,15 +48,16 @@ impl TranscriptProtocol for Transcript {
     fn challenge_scalar(&mut self, label: &'static [u8]) -> Fr {
         self.domain_sep(label);
 
-        // Hash entire transcript state
-        let mut sha256 = Sha256::new();
-        sha256.update(&self.state);
-        let hash: Vec<u8> = sha256.finalize_reset().to_vec();
-
-        // Clear the state
-        self.state.clear();
-
+        // Challenge derivation absorbs its label before hashing and scalar reduction.
+        // SHA256, reduction, then label and canonical scalar into a fresh state.
+        let hash = self.state.finalize_reset();
         let scalar = Fr::from_le_bytes_mod_order(&hash);
+        #[cfg(test)]
+        let scalar = if self.forced.as_ref().map(|(l, _)| *l) == Some(label) {
+            self.forced.take().unwrap().1
+        } else {
+            scalar
+        };
 
         self.append_scalar(label, &scalar);
 
@@ -65,7 +77,7 @@ impl TranscriptProtocol for Transcript {
     }
 
     fn domain_sep(&mut self, label: &'static [u8]) {
-        self.state.extend(label)
+        self.state.update(label)
     }
 }
 #[cfg(test)]
@@ -142,5 +154,35 @@ mod tests {
         let mut bytes = [0u8; 32];
         s.serialize_compressed(&mut bytes[..]).unwrap();
         hex::encode(bytes)
+    }
+}
+
+#[test]
+fn incremental_hash_matches_frozen_buffered_oracle() {
+    use sha2::Digest;
+    let mut buffered = b"mixed oracle".to_vec();
+    let mut tr = Transcript::new(b"mixed oracle");
+    // This oracle keeps buffered transcript hashing independent
+    // of production's incremental state and exercises reset boundaries.
+    for i in 0..100u64 {
+        let point = Element::prime_subgroup_generator() * Fr::from(i);
+        let scalar = Fr::from(i * i + 1);
+        tr.append_point(b"C", &point);
+        buffered.extend(b"C");
+        buffered.extend(point.to_bytes());
+        tr.append_u64(b"n", i);
+        buffered.extend(b"n");
+        buffered.extend(i.to_be_bytes());
+        tr.append_scalar(b"y", &scalar);
+        buffered.extend(b"y");
+        scalar.serialize_compressed(&mut buffered).unwrap();
+        tr.domain_sep(b"sep");
+        buffered.extend(b"sep");
+        buffered.extend(b"challenge");
+        let expected = Fr::from_le_bytes_mod_order(&Sha256::digest(&buffered));
+        assert_eq!(tr.challenge_scalar(b"challenge"), expected);
+        buffered.clear();
+        buffered.extend(b"challenge");
+        expected.serialize_compressed(&mut buffered).unwrap();
     }
 }

@@ -42,10 +42,7 @@ impl ReadOnlyHigherDb for MemoryDb {
     }
 
     fn get_branch_meta(&self, key: &[u8]) -> Option<BranchMeta> {
-        let branch_child = match self.branch_table.get(key) {
-            Some(b_child) => b_child,
-            None => return None,
-        };
+        let branch_child = self.branch_table.get(key)?;
 
         match branch_child {
             BranchChild::Stem(stem_id) => panic!(
@@ -114,10 +111,7 @@ impl WriteOnlyHigherDb for MemoryDb {
     }
 
     fn insert_branch(&mut self, key: Vec<u8>, meta: BranchMeta, _depth: u8) -> Option<BranchMeta> {
-        let b_child = match self.branch_table.insert(key, BranchChild::Branch(meta)) {
-            Some(b_child) => b_child,
-            None => return None,
-        };
+        let b_child = self.branch_table.insert(key, BranchChild::Branch(meta))?;
         match b_child {
             BranchChild::Stem(_) => None, // If its a stem, we return None, this only happens in ChainInsert
             BranchChild::Branch(b_meta) => Some(b_meta),

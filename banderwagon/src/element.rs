@@ -1,7 +1,7 @@
 use ark_ec::{twisted_edwards::TECurveConfig, Group, ScalarMul, VariableBaseMSM};
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
 use ark_ff::{batch_inversion, Field, One, Zero};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError, Valid};
 
 pub use ark_ed_on_bls12_381_bandersnatch::Fr;
 
@@ -59,7 +59,7 @@ impl Element {
     // This is because if (x, -y) is on the curve, then (x,y) is also on the curve.
     // This method will return two different byte arrays for each of these.
     //
-    // TODO: perhaps change this so that it chooses a representative, ie respecting the equivalence class
+    // Uncompressed coordinates may use equivalent quotient representatives.
     pub fn to_bytes_uncompressed(&self) -> [u8; 64] {
         let mut bytes = [0u8; 64];
         self.0
@@ -74,9 +74,21 @@ impl Element {
         Self(point)
     }
 
+    /// Decode canonical field coordinates and validate the Banderwagon quotient.
+    pub fn try_from_bytes_uncompressed(bytes: [u8; 64]) -> Result<Self, SerializationError> {
+        let element = Self(EdwardsProjective::deserialize_uncompressed_unchecked(
+            &bytes[..],
+        )?);
+        element.check()?;
+        Ok(element)
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Option<Element> {
+        if bytes.len() != 32 {
+            return None;
+        }
         // Switch from big endian to little endian, as arkworks library uses little endian
-        let mut bytes = bytes.to_vec();
+        let mut bytes: [u8; 32] = bytes.try_into().ok()?;
         bytes.reverse();
 
         let x: Fq = Fq::deserialize_compressed(&bytes[..]).ok()?;
@@ -356,4 +368,96 @@ mod test {
         assert!(inf1.double().is_zero());
         assert!(inf2.double().is_zero());
     }
+}
+
+#[cfg(test)]
+mod quotient_validation_tests {
+    use super::*;
+    #[test]
+    fn quotient_representatives_and_scaled_projective_states() {
+        let generator = Element::prime_subgroup_generator();
+        let p = EdwardsAffine::from(generator.0);
+        let opposite = Element(EdwardsProjective::new_unchecked(
+            -p.x,
+            -p.y,
+            p.x * p.y,
+            Fq::one(),
+        ));
+        assert_eq!(generator, opposite);
+        for element in [
+            generator,
+            opposite,
+            Element::zero(),
+            Element(EdwardsProjective::new_unchecked(
+                Fq::zero(),
+                -Fq::one(),
+                Fq::zero(),
+                Fq::one(),
+            )),
+        ] {
+            assert!(element.check().is_ok());
+            assert_eq!(
+                Element::try_from_bytes_uncompressed(element.to_bytes_uncompressed()).unwrap(),
+                element
+            );
+            assert_eq!(
+                Element::deserialize_uncompressed(&element.to_bytes_uncompressed()[..]).unwrap(),
+                element
+            );
+        }
+        let scale = Fq::from(7u64);
+        let scaled = Element(EdwardsProjective::new_unchecked(
+            p.x * scale,
+            p.y * scale,
+            p.x * p.y * scale,
+            scale,
+        ));
+        assert!(scaled.check().is_ok());
+        assert_eq!(scaled, generator);
+        let mut bad = scaled;
+        bad.0.t += Fq::one();
+        assert!(bad.check().is_err());
+        bad = scaled;
+        bad.0.z = Fq::zero();
+        assert!(bad.check().is_err());
+        bad = generator;
+        bad.0.x = Fq::zero();
+        bad.0.t = Fq::zero();
+        assert!(bad.check().is_err());
+        assert!(Element::try_from_bytes_uncompressed([0; 64]).is_err());
+        assert!(Element::try_from_bytes_uncompressed([255; 64]).is_err());
+    }
+    #[test]
+    fn on_curve_wrong_coset_is_rejected() {
+        let wrong = (1..1000u64)
+            .find_map(|i| {
+                let p = Element::get_point_from_x(Fq::from(i), true)?;
+                let e = Element(EdwardsProjective::new_unchecked(
+                    p.x,
+                    p.y,
+                    p.x * p.y,
+                    Fq::one(),
+                ));
+                if !e.subgroup_check() {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert!(wrong.check().is_err());
+        assert!(Element::try_from_bytes_uncompressed(wrong.to_bytes_uncompressed()).is_err());
+        assert!(Element::from_bytes(&wrong.to_bytes()).is_none());
+    }
+}
+
+#[test]
+fn canonical_trait_decoders_reject_truncation_and_invalid_fields() {
+    for len in 0..32 {
+        assert!(Element::deserialize_compressed(&vec![0; len][..]).is_err());
+    }
+    assert!(Element::deserialize_compressed(&[255; 32][..]).is_err());
+    assert!(Element::deserialize_uncompressed(&[0; 64][..]).is_err());
+    let bytes = Element::prime_subgroup_generator().to_bytes_uncompressed();
+    assert!(Element::deserialize_uncompressed_unchecked(&bytes[..]).is_ok());
 }

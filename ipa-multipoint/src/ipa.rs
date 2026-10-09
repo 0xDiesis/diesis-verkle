@@ -4,6 +4,7 @@ use crate::math_utils::inner_product;
 use crate::transcript::{Transcript, TranscriptProtocol};
 
 use banderwagon::{multi_scalar_mul, trait_defs::*, Element, Fr};
+#[cfg(test)]
 use itertools::Itertools;
 
 use crate::{IOError, IOErrorKind, IOResult};
@@ -12,10 +13,7 @@ use std::iter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IPAProof {
-    // TODO: These are now public because the golang code
-    // exposes the proof structure to client devs,
-    // and if we don't expose, then we can't deserialize the json
-    // proof into a IPAProof.
+    // Public proof fields support structured serialization and external verifiers.
     pub L_vec: Vec<Element>,
     pub R_vec: Vec<Element>,
     pub a: Fr,
@@ -25,18 +23,14 @@ impl IPAProof {
     pub(crate) fn serialized_size(&self) -> usize {
         (self.L_vec.len() * 2 + 1) * 32
     }
-    // might be : self.L_vec.len() * 2 * 64 + 32 or something similar
     pub(crate) fn uncompressed_size(&self) -> usize {
         (self.L_vec.len() * 2 * 64) + 32
     }
     pub fn from_bytes(bytes: &[u8], poly_degree: usize) -> IOResult<IPAProof> {
         // Given the polynomial degree, we will have log2 * 2 points
-        let num_points = log2(poly_degree);
+        let num_points = proof_rounds(bytes.len(), poly_degree, 32)?;
         let mut L_vec = Vec::with_capacity(num_points as usize);
         let mut R_vec = Vec::with_capacity(num_points as usize);
-
-        assert_eq!(((num_points * 2) + 1) * 32, bytes.len() as u32);
-        assert!(bytes.len() % 32 == 0);
 
         // Chunk the byte slice into 32 bytes
         let mut chunks = bytes.chunks_exact(32);
@@ -67,11 +61,9 @@ impl IPAProof {
         poly_degree: usize,
     ) -> IOResult<IPAProof> {
         // Given the polynomial degree, we will have log2 * 2 points
-        let num_points = log2(poly_degree);
+        let num_points = proof_rounds(bytes.len(), poly_degree, 64)?;
         let mut L_vec = Vec::with_capacity(num_points as usize);
         let mut R_vec = Vec::with_capacity(num_points as usize);
-
-        assert_eq!(((num_points * 2) * 64) + 32, bytes.len() as u32);
 
         let (points_bytes, a_bytes) = bytes.split_at(bytes.len() - 32);
 
@@ -98,6 +90,28 @@ impl IPAProof {
             .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
 
         Ok(IPAProof { L_vec, R_vec, a })
+    }
+    pub fn from_bytes_uncompressed(bytes: &[u8], poly_degree: usize) -> IOResult<Self> {
+        let rounds = proof_rounds(bytes.len(), poly_degree, 64)?;
+        let mut points = bytes[..bytes.len() - 32].chunks_exact(64).map(|b| {
+            Element::try_from_bytes_uncompressed(b.try_into().unwrap())
+                .map_err(|_| IOError::from(IOErrorKind::InvalidData))
+        });
+        let L_vec = points
+            .by_ref()
+            .take(rounds as usize)
+            .collect::<IOResult<_>>()?;
+        let R_vec = points.collect::<IOResult<_>>()?;
+        let a = Fr::deserialize_compressed(&bytes[bytes.len() - 32..])
+            .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
+        Ok(Self { L_vec, R_vec, a })
+    }
+    pub(crate) fn valid_shape(&self, crs: &CRS, b_len: usize) -> bool {
+        crs.n.is_power_of_two()
+            && crs.G.len() == crs.n
+            && b_len == crs.n
+            && self.L_vec.len() == crs.n.trailing_zeros() as usize
+            && self.R_vec.len() == self.L_vec.len()
     }
     pub fn to_bytes(&self) -> IOResult<Vec<u8>> {
         // We do not serialize the length. We assume that the deserializer knows this.
@@ -134,7 +148,33 @@ impl IPAProof {
     }
 }
 
+fn proof_rounds(len: usize, degree: usize, point_size: usize) -> IOResult<u32> {
+    if !degree.is_power_of_two() {
+        return Err(IOError::from(IOErrorKind::InvalidData));
+    }
+    let rounds = degree.trailing_zeros();
+    let expected = (rounds as usize * 2) * point_size + 32;
+    if len != expected {
+        return Err(IOError::from(IOErrorKind::InvalidData));
+    }
+    Ok(rounds)
+}
+
+/// Trusted compatibility wrapper; prefer `try_create` for fallible inputs.
 pub fn create(
+    transcript: &mut Transcript,
+    crs: CRS,
+    a_vec: Vec<Fr>,
+    a_comm: Element,
+    b_vec: Vec<Fr>,
+    // This is the z in f(z)
+    input_point: Fr,
+) -> IPAProof {
+    try_create(transcript, crs, a_vec, a_comm, b_vec, input_point)
+        .expect("trusted IPA inputs must be coherent and challenges nonzero")
+}
+
+pub fn try_create(
     transcript: &mut Transcript,
     mut crs: CRS,
     mut a_vec: Vec<Fr>,
@@ -142,7 +182,14 @@ pub fn create(
     mut b_vec: Vec<Fr>,
     // This is the z in f(z)
     input_point: Fr,
-) -> IPAProof {
+) -> Result<IPAProof, crate::ProofError> {
+    if !crs.n.is_power_of_two()
+        || crs.G.len() != crs.n
+        || a_vec.len() != crs.n
+        || b_vec.len() != crs.n
+    {
+        return Err(crate::ProofError::InvalidDomain);
+    }
     transcript.domain_sep(b"ipa");
 
     let mut a = &mut a_vec[..];
@@ -166,6 +213,9 @@ pub fn create(
     transcript.append_scalar(b"output point", &output_point);
 
     let w = transcript.challenge_scalar(b"w");
+    if w.is_zero() {
+        return Err(crate::ProofError::DegenerateChallenge);
+    }
     let Q = crs.Q * w; // XXX: It would not hurt to add this augmented point into the transcript
 
     let num_rounds = log2(n);
@@ -197,7 +247,7 @@ pub fn create(
         transcript.append_point(b"R", &R);
 
         let x = transcript.challenge_scalar(b"x");
-        let x_inv = x.inverse().unwrap();
+        let x_inv = x.inverse().ok_or(crate::ProofError::DegenerateChallenge)?;
         for i in 0..a_L.len() {
             a_L[i] += x * a_R[i];
             b_L[i] += x_inv * b_R[i];
@@ -209,11 +259,11 @@ pub fn create(
         G = G_L;
     }
 
-    IPAProof {
+    Ok(IPAProof {
         L_vec,
         R_vec,
         a: a[0],
-    }
+    })
 }
 // Halves the slice that is passed in
 // Assumes that the slice has an even length
@@ -222,7 +272,7 @@ fn halve<T>(scalars: &mut [T]) -> (&mut [T], &mut [T]) {
     scalars.split_at_mut(len / 2)
 }
 fn log2(n: usize) -> u32 {
-    n.next_power_of_two().trailing_zeros()
+    n.trailing_zeros()
 }
 
 impl IPAProof {
@@ -235,6 +285,9 @@ impl IPAProof {
         input_point: Fr,
         output_point: Fr,
     ) -> bool {
+        if !self.valid_shape(&crs, b.len()) {
+            return false;
+        }
         transcript.domain_sep(b"ipa");
 
         let mut G = &mut crs.G[..];
@@ -244,9 +297,6 @@ impl IPAProof {
 
         // Check that the prover computed an inner proof
         // over a vector of size n
-        if crs.n != 1 << num_rounds {
-            return false;
-        }
 
         // transcript.append_u64(b"n", n as u64);
         transcript.append_point(b"C", &a_comm);
@@ -254,16 +304,21 @@ impl IPAProof {
         transcript.append_scalar(b"output point", &output_point);
 
         let w = transcript.challenge_scalar(b"w");
+        if w.is_zero() {
+            return false;
+        }
         let Q = crs.Q * w;
 
         let mut a_comm = a_comm + (Q * output_point);
 
         let challenges = generate_challenges(self, transcript);
+        if challenges.iter().any(Zero::is_zero) {
+            return false;
+        }
         let mut challenges_inv = challenges.clone();
         batch_inversion(&mut challenges_inv);
 
         // Compute the expected commitment
-        // TODO use a multizip from itertools
         for i in 0..num_rounds {
             let x = challenges[i];
             let x_inv = challenges_inv[i];
@@ -300,15 +355,13 @@ impl IPAProof {
         input_point: Fr,
         output_point: Fr,
     ) -> bool {
-        transcript.domain_sep(b"ipa");
-
-        let logn = self.L_vec.len();
-        let n = crs.n;
-        // Check that the prover computed an inner proof
-        // over a vector of size n
-        if n != (1 << logn) {
+        if !self.valid_shape(crs, b_vec.len()) {
             return false;
         }
+        transcript.domain_sep(b"ipa");
+
+        // Check that the prover computed an inner proof
+        // over a vector of size n
 
         // transcript.append_u64(b"n", n as u64);
         transcript.append_point(b"C", &a_comm);
@@ -318,27 +371,22 @@ impl IPAProof {
         // Compute the scalar which will augment the point corresponding
         // to the inner product
         let w = transcript.challenge_scalar(b"w");
+        if w.is_zero() {
+            return false;
+        }
 
         // Generate all of the necessary challenges and their inverses
         let challenges = generate_challenges(self, transcript);
+        if challenges.iter().any(Zero::is_zero) {
+            return false;
+        }
         let mut challenges_inv = challenges.clone();
         batch_inversion(&mut challenges_inv);
 
         // Generate the coefficients for the `G` vector and the `b` vector
         // {-g_i}{-b_i}
-        let mut g_i: Vec<Fr> = Vec::with_capacity(1 << logn);
-        let mut b_i: Vec<Fr> = Vec::with_capacity(1 << logn);
-
-        for index in 0..n {
-            let mut b = -Fr::one();
-            for (bit, x_inv) in to_bits(index, logn).zip_eq(&challenges_inv) {
-                if bit == 1 {
-                    b *= x_inv;
-                }
-            }
-            b_i.push(b);
-            g_i.push(self.a * b);
-        }
+        let b_i = folding_coefficients(&challenges_inv, -Fr::one());
+        let g_i: Vec<_> = b_i.iter().map(|s| self.a * s).collect();
 
         let b_0 = inner_product(&b_vec, &b_i);
         let q_i = w * (output_point + self.a * b_0);
@@ -355,19 +403,12 @@ impl IPAProof {
                 .chain(self.R_vec.iter())
                 .chain(iter::once(&a_comm))
                 .chain(iter::once(&crs.Q))
-                // XXX: note that we can do a Halo style optimization here also
-                // but instead of being (m log(d)) it will be O(mn) which is still good
-                // because the verifier will be doing m*n field operations instead of m size n multi-exponentiations
-                // This is done by interpreting g_i as coefficients in monomial basis
-                // TODO: Optimise the majority of the time is spent on this vector, precompute
+                // The fixed CRS bases pair with the folded G coefficient vector.
                 .chain(crs.G.iter()),
         )
         .is_zero()
     }
-    // It's only semi unrolled.
-    // This is being committed incase someone goes through the git history
-    // The fully unrolled code is not that intuitive, but maybe this semi
-    // unrolled version can help you to figure out the gap
+    // Equivalent partially unrolled verifier for reference comparisons.
     pub fn verify_semi_multiexp(
         &self,
         transcript: &mut Transcript,
@@ -377,15 +418,13 @@ impl IPAProof {
         input_point: Fr,
         output_point: Fr,
     ) -> bool {
-        transcript.domain_sep(b"ipa");
-
-        let logn = self.L_vec.len();
-        let n = crs.n;
-        // Check that the prover computed an inner proof
-        // over a vector of size n
-        if n != (1 << logn) {
+        if !self.valid_shape(crs, b_Vec.len()) {
             return false;
         }
+        transcript.domain_sep(b"ipa");
+
+        // Check that the prover computed an inner proof
+        // over a vector of size n
 
         // transcript.append_u64(b"n", n as u64);
         transcript.append_point(b"C", &a_comm);
@@ -393,11 +432,17 @@ impl IPAProof {
         transcript.append_scalar(b"output point", &output_point);
 
         let w = transcript.challenge_scalar(b"w");
+        if w.is_zero() {
+            return false;
+        }
         let Q = crs.Q * w;
 
         let a_comm = a_comm + (Q * output_point);
 
         let challenges = generate_challenges(self, transcript);
+        if challenges.iter().any(Zero::is_zero) {
+            return false;
+        }
         let mut challenges_inv = challenges.clone();
         batch_inversion(&mut challenges_inv);
 
@@ -413,20 +458,10 @@ impl IPAProof {
         );
 
         // {g_i}
-        let mut g_i: Vec<Fr> = Vec::with_capacity(1 << logn);
-
-        for index in 0..n {
-            let mut g = Fr::one();
-            for (bit, x_inv) in to_bits(index, logn).zip_eq(&challenges_inv) {
-                if bit == 1 {
-                    g *= x_inv;
-                }
-            }
-            g_i.push(g);
-        }
+        let g_i = folding_coefficients(&challenges_inv, Fr::one());
 
         let b_0 = inner_product(&b_Vec, &g_i);
-        let G_0 = slow_vartime_multiscalar_mul(g_i.iter(), crs.G.iter()); // TODO: Optimise; the majority of the time is spent on this vector, precompute
+        let G_0 = slow_vartime_multiscalar_mul(g_i.iter(), crs.G.iter());
 
         let exp_P = (G_0 * self.a) + Q * (self.a * b_0);
 
@@ -434,6 +469,7 @@ impl IPAProof {
     }
 }
 
+#[cfg(test)]
 fn to_bits(n: usize, bits_needed: usize) -> impl Iterator<Item = u8> {
     (0..bits_needed).map(move |i| ((n >> i) & 1) as u8).rev()
 }
@@ -504,5 +540,90 @@ mod tests {
             input_point,
             output_point
         ));
+    }
+}
+
+// Fold G_L + x^-1 G_R. The reversed challenge order doubles adjacent
+// coefficients; induction gives product x_j^-1 over the set bits of i.
+fn folding_coefficients(inverses: &[Fr], initial: Fr) -> Vec<Fr> {
+    let mut coefficients = Vec::with_capacity(1usize << inverses.len());
+    coefficients.push(initial);
+    for inverse in inverses.iter().rev() {
+        let len = coefficients.len();
+        for i in 0..len {
+            coefficients.push(coefficients[i] * inverse);
+        }
+    }
+    coefficients
+}
+#[test]
+fn linear_coefficients_match_bit_oracle() {
+    for rounds in 0..=8 {
+        let inverses: Vec<_> = (0..rounds).map(|i| Fr::from((i + 2) as u64)).collect();
+        for initial in [Fr::one(), -Fr::one()] {
+            let slow: Vec<_> = (0..1usize << rounds)
+                .map(|i| {
+                    to_bits(i, rounds)
+                        .zip_eq(&inverses)
+                        .fold(initial, |v, (bit, x)| if bit == 1 { v * x } else { v })
+                })
+                .collect();
+            assert_eq!(folding_coefficients(&inverses, initial), slow);
+        }
+    }
+}
+
+#[test]
+fn degenerate_ipa_challenges_fail_closed() {
+    for label in [b"w" as &'static [u8], b"x"] {
+        let crs = CRS::new(4, b"challenge tests");
+        let a = vec![Fr::one(); 4];
+        let b = vec![Fr::one(); 4];
+        let c = slow_vartime_multiscalar_mul(a.iter(), crs.G.iter());
+        let proof = create(
+            &mut Transcript::new(b"zero"),
+            crs.clone(),
+            a.clone(),
+            c,
+            b.clone(),
+            Fr::from(9u64),
+        );
+        let mut tr = Transcript::new(b"zero");
+        tr.force_challenge(label, Fr::zero());
+        assert_eq!(
+            try_create(&mut tr, crs.clone(), a, c, b.clone(), Fr::from(9u64)),
+            Err(crate::ProofError::DegenerateChallenge)
+        );
+        for variant in 0..3 {
+            let mut tr = Transcript::new(b"zero");
+            tr.force_challenge(label, Fr::zero());
+            let accepted = match variant {
+                0 => proof.verify(
+                    &mut tr,
+                    crs.clone(),
+                    b.clone(),
+                    c,
+                    Fr::from(9u64),
+                    Fr::from(4u64),
+                ),
+                1 => proof.verify_multiexp(
+                    &mut tr,
+                    &crs,
+                    b.clone(),
+                    c,
+                    Fr::from(9u64),
+                    Fr::from(4u64),
+                ),
+                _ => proof.verify_semi_multiexp(
+                    &mut tr,
+                    &crs,
+                    b.clone(),
+                    c,
+                    Fr::from(9u64),
+                    Fr::from(4u64),
+                ),
+            };
+            assert!(!accepted);
+        }
     }
 }
