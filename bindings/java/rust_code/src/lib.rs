@@ -27,7 +27,6 @@ use once_cell::sync::Lazy;
 
 use ipa_multipoint::ipa::IPAProof;
 use ipa_multipoint::multiproof::MultiPointProof;
-use std::convert::TryInto;
 use verkle_trie::proof::{ExtPresent, VerificationHint, VerkleProof};
 
 // TODO: Use a pointer here instead. This is only being used so that the interface does not get changed.
@@ -141,14 +140,7 @@ pub extern "system" fn Java_verkle_cryptography_LibIpaMultipoint_updateSparse<'l
             return JByteArray::default();
         }
     };
-    let old: Vec<ffi_interface::ScalarBytes> = old
-        .chunks_exact(32)
-        .map(|x| {
-            let mut array = [0u8; 32];
-            array.copy_from_slice(x);
-            array
-        })
-        .collect();
+    let old: Vec<ffi_interface::ScalarBytes> = old.as_chunks::<32>().0.to_vec();
     let new = match parse_scalars(&env, new_values) {
         Ok(v) => v,
         Err(e) => {
@@ -157,14 +149,7 @@ pub extern "system" fn Java_verkle_cryptography_LibIpaMultipoint_updateSparse<'l
             return JByteArray::default();
         }
     };
-    let new: Vec<ffi_interface::ScalarBytes> = new
-        .chunks_exact(32)
-        .map(|x| {
-            let mut array = [0u8; 32];
-            array.copy_from_slice(x);
-            array
-        })
-        .collect();
+    let new: Vec<ffi_interface::ScalarBytes> = new.as_chunks::<32>().0.to_vec();
     let commitment =
         match ffi_interface::update_commitment_sparse(&CONFIG, commitment, pos, old, new) {
             Ok(v) => v,
@@ -231,8 +216,10 @@ pub extern "system" fn Java_verkle_cryptography_LibIpaMultipoint_compressMany<'l
         }
     };
     let compressed: Vec<u8> = commitments
-        .chunks_exact(64)
-        .flat_map(|x| ffi_interface::serialize_commitment(x.try_into().unwrap()))
+        .as_chunks::<64>()
+        .0
+        .iter()
+        .flat_map(|x| ffi_interface::serialize_commitment(*x))
         .collect();
     let result = match env.byte_array_from_slice(&compressed) {
         Ok(s) => s,
@@ -334,14 +321,7 @@ pub extern "system" fn Java_verkle_cryptography_LibIpaMultipoint_hashMany<'local
             return JByteArray::default();
         }
     };
-    let input: Vec<ffi_interface::CommitmentBytes> = input
-        .chunks_exact(64)
-        .map(|x| {
-            let mut array = [0u8; 64];
-            array.copy_from_slice(x);
-            array
-        })
-        .collect();
+    let input: Vec<ffi_interface::CommitmentBytes> = input.as_chunks::<64>().0.to_vec();
     let hashes = ffi_interface::hash_commitments(&input);
     let hashes: Vec<u8> = hashes.iter().flat_map(|x| x.iter().copied()).collect();
     let result = match env.byte_array_from_slice(&hashes) {

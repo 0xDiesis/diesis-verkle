@@ -46,7 +46,7 @@ pub fn chunkify_code(code: Vec<u8>) -> Vec<Bytes32> {
     let aligned_code = zero_align_bytes(code, 31);
 
     // First we chunk the aligned code into 31 bytes
-    let chunked_code31 = aligned_code.chunks_exact(31);
+    let chunked_code31 = aligned_code.as_chunks::<31>().0.iter();
 
     let mut remaining_pushdata_bytes = Vec::new();
     // The first byte will not have any remaing push data bytes

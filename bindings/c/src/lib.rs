@@ -1,4 +1,4 @@
-// Rust 1.70 compatibility: usize::is_multiple_of was stabilized in Rust 1.87.
+// Keep explicit modulo guards for the C ABI buffer lengths.
 #![allow(clippy::manual_is_multiple_of)]
 //! C callers must provide a live Context pointer and readable buffers covering their declared
 //! lengths (and writable output buffers of each operation's documented size). Null and length
@@ -84,7 +84,7 @@ pub extern "C" fn multi_scalar_mul(
     };
 
     let mut inputs = Vec::with_capacity(len);
-    for chunk in scalar_slice.chunks_exact(32) {
+    for chunk in scalar_slice.as_chunks::<32>().0.iter() {
         inputs.push(fr_from_le_bytes(chunk).unwrap());
     }
 
@@ -112,9 +112,10 @@ pub extern "C" fn create_proof(ctx: *mut Context, input: *const u8, len: usize, 
 
     let num_openings = len / CHUNK_SIZE;
 
-    let proofs_bytes = scalar_slice.chunks_exact(CHUNK_SIZE);
+    let (proofs_bytes, remainder) = scalar_slice.as_chunks::<CHUNK_SIZE>();
+    let proofs_bytes = proofs_bytes.iter();
     assert!(
-        proofs_bytes.remainder().is_empty(),
+        remainder.is_empty(),
         "There should be no left over bytes when chunking the proof"
     );
 
@@ -168,9 +169,10 @@ pub extern "C" fn create_proof_uncompressed(
 
     let num_openings = len / CHUNK_SIZE;
 
-    let proofs_bytes = scalar_slice.chunks_exact(CHUNK_SIZE);
+    let (proofs_bytes, remainder) = scalar_slice.as_chunks::<CHUNK_SIZE>();
+    let proofs_bytes = proofs_bytes.iter();
     assert!(
-        proofs_bytes.remainder().is_empty(),
+        remainder.is_empty(),
         "There should be no left over bytes when chunking the proof"
     );
 
@@ -230,7 +232,7 @@ pub extern "C" fn verify_proof(ctx: *mut Context, input: *const u8, len: usize) 
         (proof_slice, verifier_queries_slices, ctx_ref)
     };
 
-    let verifier_queries_bytes = verifier_queries_slices.chunks_exact(CHUNK_SIZE);
+    let verifier_queries_bytes = verifier_queries_slices.as_chunks::<CHUNK_SIZE>().0.iter();
 
     let num_openings = verifier_queries_bytes.len();
 
@@ -296,7 +298,7 @@ pub extern "C" fn verify_proof_uncompressed(
         (proof_slice, verifier_queries_slices, ctx_ref)
     };
 
-    let verifier_queries_bytes = verifier_queries_slices.chunks_exact(CHUNK_SIZE);
+    let verifier_queries_bytes = verifier_queries_slices.as_chunks::<CHUNK_SIZE>().0.iter();
 
     let num_openings = verifier_queries_bytes.len();
 

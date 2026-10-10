@@ -18,7 +18,7 @@ authors = ["Kevaundray Wedderburn <kev@the.dev>"]
 edition = "2021"
 license = "MIT"
 version = "0.0.1"
-rust-version = "1.70"
+rust-version = "1.99"
 repository = "https://github.com/crate-crypto/rust-verkle"
 
 [profile.bench]

@@ -1,4 +1,4 @@
-// Rust 1.70 compatibility: usize::is_multiple_of was stabilized in Rust 1.87.
+// Keep explicit modulo guards for serialized buffer lengths.
 #![allow(clippy::manual_is_multiple_of)]
 use banderwagon::{CanonicalDeserialize, CanonicalSerialize};
 use banderwagon::{Element, Fr};
@@ -39,9 +39,11 @@ pub fn deserialize_update_commitment_sparse(
         });
     }
 
-    let update_commitment_bytes = input_without_commitment_bytes.chunks_exact(CHUNK_SIZE);
+    let (update_commitment_bytes, remainder) =
+        input_without_commitment_bytes.as_chunks::<CHUNK_SIZE>();
+    let update_commitment_bytes = update_commitment_bytes.iter();
     assert!(
-        update_commitment_bytes.remainder().is_empty(),
+        remainder.is_empty(),
         "There should be no left over bytes when chunking the input"
     );
 

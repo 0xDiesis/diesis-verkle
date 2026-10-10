@@ -103,7 +103,7 @@ fn main() {
             PrecomputedWeights::new(n),
         )
     });
-    // Keep this example compatible with Rust 1.70; usize::div_ceil needs 1.73.
+    // Keep the explicit ceiling division used by this performance example.
     #[allow(clippy::manual_div_ceil)]
     let num_polys = match shape.as_str() {
         "repeat" | "identity" => 1,

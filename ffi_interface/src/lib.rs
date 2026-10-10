@@ -1,4 +1,4 @@
-// Rust 1.70 compatibility: usize::is_multiple_of was stabilized in Rust 1.87.
+// Keep explicit modulo guards for serialized buffer lengths.
 #![allow(clippy::manual_is_multiple_of)]
 pub mod serialization;
 
@@ -165,7 +165,7 @@ fn _commit_to_scalars(context: &Context, scalars: &[u8]) -> Result<Element, Erro
     }
 
     let mut inputs = Vec::with_capacity(num_scalars);
-    for chunk in scalars.chunks_exact(32) {
+    for chunk in scalars.as_chunks::<32>().0.iter() {
         inputs.push(fr_from_le_bytes(chunk)?);
     }
 
@@ -317,9 +317,10 @@ pub fn create_proof(context: &Context, input: Vec<u8>) -> Result<Vec<u8>, Error>
     }
     let num_openings = input.len() / CHUNK_SIZE;
 
-    let proofs_bytes = input.chunks_exact(CHUNK_SIZE);
+    let (proofs_bytes, remainder) = input.as_chunks::<CHUNK_SIZE>();
+    let proofs_bytes = proofs_bytes.iter();
     assert!(
-        proofs_bytes.remainder().is_empty(),
+        remainder.is_empty(),
         "There should be no left over bytes when chunking the proof"
     );
 
@@ -383,7 +384,7 @@ pub fn verify_proof(context: &Context, input: Vec<u8>) -> Result<(), Error> {
     let num_openings = verifier_queries_bytes.len() / CHUNK_SIZE;
 
     // Create an iterator over the input Vec<u8>
-    let chunked_verifier_queries = verifier_queries_bytes.chunks_exact(CHUNK_SIZE);
+    let chunked_verifier_queries = verifier_queries_bytes.as_chunks::<CHUNK_SIZE>().0.iter();
 
     // - Deserialize verifier queries
     let mut verifier_queries: Vec<VerifierQuery> = Vec::with_capacity(num_openings);

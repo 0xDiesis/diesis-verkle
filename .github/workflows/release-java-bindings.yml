@@ -64,7 +64,7 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.target }}
       - name: Install Zig

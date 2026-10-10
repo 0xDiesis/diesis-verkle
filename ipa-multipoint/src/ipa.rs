@@ -33,7 +33,7 @@ impl IPAProof {
         let mut R_vec = Vec::with_capacity(num_points as usize);
 
         // Chunk the byte slice into 32 bytes
-        let mut chunks = bytes.chunks_exact(32);
+        let mut chunks = bytes.as_chunks::<32>().0.iter();
 
         for _ in 0..num_points {
             let chunk = chunks.next().unwrap();
@@ -51,7 +51,7 @@ impl IPAProof {
 
         let last_32_bytes = chunks.next().unwrap();
 
-        let a: Fr = CanonicalDeserialize::deserialize_compressed(last_32_bytes)
+        let a: Fr = CanonicalDeserialize::deserialize_compressed(last_32_bytes.as_slice())
             .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
 
         Ok(IPAProof { L_vec, R_vec, a })
@@ -70,18 +70,18 @@ impl IPAProof {
         assert!(a_bytes.len() == 32);
 
         // Chunk the byte slice into 64 bytes
-        let mut chunks = points_bytes.chunks_exact(64);
+        let mut chunks = points_bytes.as_chunks::<64>().0.iter();
 
         for _ in 0..num_points {
             let chunk = chunks.next().unwrap();
-            let L_bytes: [u8; 64] = chunk.try_into().unwrap();
+            let L_bytes: [u8; 64] = *chunk;
             let point: Element = Element::from_bytes_unchecked_uncompressed(L_bytes);
             L_vec.push(point)
         }
 
         for _ in 0..num_points {
             let chunk = chunks.next().unwrap();
-            let R_bytes: [u8; 64] = chunk.try_into().unwrap();
+            let R_bytes: [u8; 64] = *chunk;
             let point: Element = Element::from_bytes_unchecked_uncompressed(R_bytes);
             R_vec.push(point)
         }
@@ -93,10 +93,14 @@ impl IPAProof {
     }
     pub fn from_bytes_uncompressed(bytes: &[u8], poly_degree: usize) -> IOResult<Self> {
         let rounds = proof_rounds(bytes.len(), poly_degree, 64)?;
-        let mut points = bytes[..bytes.len() - 32].chunks_exact(64).map(|b| {
-            Element::try_from_bytes_uncompressed(b.try_into().unwrap())
-                .map_err(|_| IOError::from(IOErrorKind::InvalidData))
-        });
+        let mut points = bytes[..bytes.len() - 32]
+            .as_chunks::<64>()
+            .0
+            .iter()
+            .map(|b| {
+                Element::try_from_bytes_uncompressed(*b)
+                    .map_err(|_| IOError::from(IOErrorKind::InvalidData))
+            });
         let L_vec = points
             .by_ref()
             .take(rounds as usize)

@@ -100,7 +100,7 @@ pub(crate) fn chunk64(bytes64: [u8; 64]) -> [u128; 5] {
     input_as_u128
 }
 // Pads the input until it is a multiple of `alignment`
-// Preserve Rust 1.70 compatibility; usize::is_multiple_of needs Rust 1.87.
+// Keep explicit modulo arithmetic for byte alignment.
 #[allow(clippy::manual_is_multiple_of)]
 pub(crate) fn zero_align_bytes(mut bytes: Vec<u8>, alignment: usize) -> Vec<u8> {
     assert!(alignment > 0);
